@@ -2,6 +2,7 @@ import logging
 import sys
 import os
 import re
+import shlex
 import subprocess
 import shutil
 from PySide6.QtCore import Qt, QTimer, QRect, QSize
@@ -500,13 +501,18 @@ class MainWindow(MSFluentWindow):
             command_prefix = ["start", "cmd", "/K"]
             subprocess.Popen(command_prefix + command, env=env, shell=True)
         elif sys.platform == "darwin":
-            cmd_str = " ".join(command)
-            # 使用 osascript 执行命令，要先进入正确目录
+            # 路径可能含空格（如 ~/Library/Application Support），必须先做 shell 引用，
+            # 否则 AppleScript 里的 `cd ...` 会被 zsh 拆成多个参数而失败。
+            cmd_str = shlex.join(command)
+            dir_str = shlex.quote(str(DATA_DIR))
+            script_line = f"cd {dir_str} && {cmd_str}"
+            # 再转义一层：AppleScript 字符串中的反斜杠与双引号
+            script_line = script_line.replace("\\", "\\\\").replace('"', '\\"')
             apple_script = [
                 'osascript',
                 '-e',
                 f'''tell application "Terminal"
-                    do script "cd {DATA_DIR} && {cmd_str}"
+                    do script "{script_line}"
                 end tell'''
             ]
             subprocess.Popen(apple_script, env=env)
