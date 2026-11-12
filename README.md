@@ -2,6 +2,67 @@
 
 # Sakura Launcher GUI
 
+> ## 🍎 macOS 适配分支（v1.2.0-beta-patched）
+>
+> 本仓库是上游 [PiDanShouRouZhouXD/Sakura_Launcher_GUI](https://github.com/PiDanShouRouZhouXD/Sakura_Launcher_GUI)
+> `v1.2.0-beta` 的 **macOS 适配分支**，只改代码、不碰模型与协议。分支名 `macos-patched`。
+>
+> ### 改了什么
+>
+> **窗口与系统集成**
+> - 使用 macOS 原生标题栏（红黄绿在左上角，标题进系统标题栏），双击标题栏即可缩放
+> - 修复原生标题栏切换后窗口无法拖动的问题
+> - 退出时等待后台线程结束，修复退出瞬间的 `SIGABRT`（`QThread: Destroyed while thread is still running`）
+>
+> **数据目录外置（不再写进 `.app`）**
+>
+> | 内容 | 路径 |
+> |---|---|
+> | 配置 | `~/Library/Application Support/SakuraLauncher/sakura-launcher_config.json` |
+> | llama.cpp | `~/Library/Application Support/SakuraLauncher/llama/` |
+> | 下载的模型 | `~/Library/Application Support/SakuraLauncher/models/` |
+> | 日志 | `~/Library/Logs/SakuraLauncher/launcher.log` |
+>
+> 好处：App 包内只有程序本体（约 91 MB），`codesign -v` 干净、升级不丢数据。
+>
+> **模型管理**
+> - 支持直接引用 Ollama 模型仓库：`Ollama` 的 `blobs` 目录下没有 `.gguf` 扩展名的文件，
+>   现在按 `GGUF` 文件头识别，无需复制或改名
+> - 模型下拉框改为只读下拉框，修复长模型名与下拉箭头重叠、清空按钮挤压的问题
+> - 名称过长时中间省略（如 `sakura-14b-…-v1.0-iq4xs.gguf`），悬停显示全名
+> - 按 `sha256` 匹配内置模型配置，不再依赖文件名
+>
+> **功能修复**
+> - 性能测试按 `(npp + ntg) * max(npl)` 自动抬升上下文，修复 `find_slot` / `llama_decode() failed`
+> - Apple Silicon 上按统一内存的 75% 自动推荐并发数与上下文
+> - 设置页加滚动区，窗口较矮时不再裁掉底部选项；新增目录浏览按钮
+> - 禁用上游自动更新（`-patched` 构建），避免升级时覆盖本地补丁
+> - `CFBundleShortVersionString` 由 `0.0.0` 修正为 `1.2.0`（补丁不抬版本号，保持与上游 `v1.2.0-beta` 同代，避免被当成新版本）
+>
+> ### 从源码构建
+>
+> ```bash
+> uv venv --python 3.12
+> uv pip install --index-url https://pypi.tuna.tsinghua.edu.cn/simple \
+>   PySide6-Essentials==6.9.1 shiboken6==6.9.1 darkdetect \
+>   PySide6-Fluent-Widgets --no-deps PySideSix-Frameless-Window \
+>   aiohttp requests pyinstaller pillow
+> .venv/bin/pyinstaller main.spec --noconfirm
+> ```
+>
+> 产物在 `dist/SakuraLauncher.app`。首次运行前建议：
+>
+> ```bash
+> xattr -cr dist/SakuraLauncher.app
+> codesign --force --deep --sign - dist/SakuraLauncher.app
+> ```
+>
+> （未做 Apple 公证，从网络下载的包需要「右键 → 打开」或在系统设置里放行。）
+>
+> ### 协议
+>
+> 与上游一致，遵循 **GPLv3**。SakuraLLM 模型为 **CC-BY-NC-SA 4.0**，禁止商用。
+
 <!-- PROJECT LOGO -->
 <br />
 
