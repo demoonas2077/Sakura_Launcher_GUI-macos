@@ -96,5 +96,7 @@ elif sys.platform == 'darwin':
             'NSHighResolutionCapable': True,
             'LSBackgroundOnly': False,
             'CFBundleDisplayName': 'SakuraLauncher',
+            'CFBundleShortVersionString': '1.2.0',
+            'CFBundleVersion': '1.2.0',
         }
     )

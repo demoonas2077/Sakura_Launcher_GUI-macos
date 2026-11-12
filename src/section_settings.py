@@ -1,6 +1,12 @@
 import logging
 from PySide6.QtCore import Qt, Signal, QObject, QTimer, QThread
-from PySide6.QtWidgets import QFrame, QHeaderView, QTableWidgetItem
+from PySide6.QtWidgets import (
+    QFrame,
+    QHeaderView,
+    QTableWidgetItem,
+    QScrollArea,
+    QFileDialog,
+)
 from qfluentwidgets import (
     TextEdit,
     FluentIcon as FIF,
@@ -9,7 +15,7 @@ from qfluentwidgets import (
 )
 import requests
 
-from .common import SAKURA_LAUNCHER_GUI_VERSION
+from .common import SAKURA_LAUNCHER_GUI_VERSION, DISABLE_LAUNCHER_UPDATE
 from .setting import SETTING
 from .ui import *
 
@@ -221,27 +227,72 @@ class SettingsSection(QFrame):
         llamacpp_path.textChanged.connect(
             lambda text: SETTING.set_value("llamacpp_path", text)
         )
+
+        def browse_llamacpp_dir():
+            chosen = QFileDialog.getExistingDirectory(self, "选择 llama.cpp 所在目录")
+            if chosen:
+                llamacpp_path.setText(chosen)
+
+        browse_llamacpp_button = UiButton("浏览…", FIF.FOLDER, browse_llamacpp_dir)
+        browse_llamacpp_button.setFixedWidth(110)
+
         model_search_paths = TextEdit()
         model_search_paths.setPlaceholderText(
             "模型搜索路径（每行一个路径，已经默认包含当前目录）"
         )
         model_search_paths.setPlainText(SETTING.model_search_paths)
+        model_search_paths.setFixedHeight(120)
         model_search_paths.textChanged.connect(
             lambda: SETTING.set_value(
                 "model_search_paths", model_search_paths.toPlainText()
             )
         )
 
-        return UiCol(
-            button_group,
-            remember_window_state,
-            remember_advanced_state,
-            no_gpu_ability_check,
-            no_context_check,
-            UiOptionRow("模型列表排序", model_sort_combo),
-            UiOptionRow("llama.cpp文件夹", llamacpp_path),
-            UiOptionCol("模型搜索路径", model_search_paths),
+        def browse_model_dir():
+            chosen = QFileDialog.getExistingDirectory(self, "选择模型所在目录")
+            if not chosen:
+                return
+            paths = [line.strip() for line in model_search_paths.toPlainText().splitlines()]
+            if chosen in paths:
+                return
+            paths.append(chosen)
+            model_search_paths.setPlainText("\n".join(paths))
+
+        browse_model_button = UiButton("添加目录…", FIF.FOLDER, browse_model_dir)
+        browse_model_button.setFixedWidth(110)
+
+        model_paths_row = QHBoxLayout()
+        model_paths_row.addWidget(browse_model_button)
+        model_paths_row.addStretch(1)
+
+        content = QFrame()
+        content.setLayout(
+            UiCol(
+                button_group,
+                remember_window_state,
+                remember_advanced_state,
+                no_gpu_ability_check,
+                no_context_check,
+                UiOptionRow("模型列表排序", model_sort_combo),
+                UiOptionRow(
+                    "llama.cpp文件夹",
+                    UiRow((llamacpp_path, 1), (browse_llamacpp_button, 0)),
+                ),
+                UiOptionCol("模型搜索路径", model_search_paths),
+                model_paths_row,
+            )
         )
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.NoFrame)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area.setStyleSheet(
+            "QScrollArea {background: transparent; border: none;}"
+            "QScrollArea > QWidget > QWidget {background: transparent;}"
+        )
+        scroll_area.setWidget(content)
+        return scroll_area
 
     def _create_config_editor_section(self):
         self.config_table = ConfigEditor()
@@ -300,6 +351,11 @@ class SettingsSection(QFrame):
         return split_version(version) > split_version(SAKURA_LAUNCHER_GUI_VERSION)
 
     def check_launcher_update(self):
+        # 本地补丁版不去查上游版本：查到了也只会把补丁覆盖掉
+        if DISABLE_LAUNCHER_UPDATE:
+            logging.info("本地补丁版：已禁用启动器更新检查")
+            return
+
         def notify_need_update(version: str):
             if self.is_version_newer(version):
                 UiInfoBarWarning(self, f"检测到新版本启动器{version}发布")
@@ -309,6 +365,13 @@ class SettingsSection(QFrame):
         thread.start()
 
     def update_launcher(self):
+        if DISABLE_LAUNCHER_UPDATE:
+            UiInfoBarSuccess(
+                self,
+                "这是本地补丁版，自动更新已禁用；升级请手动替换 patched 安装包",
+            )
+            return
+
         def notify_need_update(version: str):
             if self.is_version_newer(version):
                 self.sig_need_update.emit(version)

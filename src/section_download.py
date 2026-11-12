@@ -20,7 +20,14 @@ from qfluentwidgets import (
     InfoBar,
 )
 
-from .common import CURRENT_DIR, get_resource_path, GHPROXY_URL
+from .common import (
+    CURRENT_DIR,
+    DATA_DIR,
+    MODELS_DIR,
+    get_llama_dir,
+    get_resource_path,
+    GHPROXY_URL,
+)
 from .llamacpp import *
 from .sakura import SAKURA_LIST, Sakura
 from .ui import *
@@ -123,7 +130,9 @@ class DownloadThread(QThread):
             block_size = 1024  # 1 KB
             downloaded_size = 0
 
-            file_path = os.path.join(CURRENT_DIR, self.filename)
+            target_dir = MODELS_DIR if self.filename.endswith(".gguf") else DATA_DIR
+            os.makedirs(target_dir, exist_ok=True)
+            file_path = os.path.join(target_dir, self.filename)
             with open(file_path, "wb") as file:
                 for data in response.iter_content(block_size):
                     size = file.write(data)
@@ -347,7 +356,7 @@ class DownloadSection(QFrame):
         UiInfoBarSuccess(self, f"{new_task.name}开始下载，请在下载进度页面查看进度")
 
     def _update_current_llamacpp_version(self):
-        version = get_llamacpp_version(os.path.join(CURRENT_DIR, "llama"))
+        version = get_llamacpp_version(get_llama_dir())
         if version:
             self.label_current_llamacpp_version.setText(f"b{version}")
         else:
@@ -362,7 +371,7 @@ class DownloadSection(QFrame):
         )
 
         def on_download_sakura_finish():
-            file_path = os.path.join(CURRENT_DIR, task.filename)
+            file_path = os.path.join(MODELS_DIR, task.filename)
             if sakura.check_sha256(file_path):
                 task.state = DownloadTaskState.SUCCESS
                 UiInfoBarSuccess(self, f"{task.name}下载成功")
@@ -383,10 +392,10 @@ class DownloadSection(QFrame):
         )
 
         def on_download_cudart_finish():
-            file_path = os.path.join(CURRENT_DIR, task.filename)
+            file_path = os.path.join(DATA_DIR, task.filename)
             try:
                 task.state = DownloadTaskState.SUCCESS
-                unzip_llamacpp(CURRENT_DIR, task.filename)
+                unzip_llamacpp(DATA_DIR, task.filename)
                 UiInfoBarSuccess(self, f"{task.name}下载成功")
             except Exception as e:
                 task.state = DownloadTaskState.ERROR
@@ -407,10 +416,10 @@ class DownloadSection(QFrame):
         )
 
         def on_download_llamacpp_finish():
-            file_path = os.path.join(CURRENT_DIR, task.filename)
+            file_path = os.path.join(DATA_DIR, task.filename)
             try:
                 task.state = DownloadTaskState.SUCCESS
-                unzip_llamacpp(CURRENT_DIR, task.filename)
+                unzip_llamacpp(DATA_DIR, task.filename)
                 UiInfoBarSuccess(self, f"{task.name}下载成功")
                 self._update_current_llamacpp_version()
             except Exception as e:
@@ -423,7 +432,7 @@ class DownloadSection(QFrame):
 
         self._start_download_task(task, on_finish=on_download_llamacpp_finish)
 
-        if llamacpp.require_cuda and not is_cudart_exist(CURRENT_DIR):
+        if llamacpp.require_cuda and not is_cudart_exist(DATA_DIR):
             self.start_download_cudart()
 
     def start_download_launcher(self, version: str):

@@ -1,9 +1,10 @@
 import logging
 import sys
 import os
+import re
 import subprocess
 import shutil
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import Qt, QTimer, QRect, QSize
 from PySide6.QtWidgets import QApplication, QAbstractScrollArea
 from PySide6.QtGui import QIcon, QColor, QFont
 from qfluentwidgets import (
@@ -29,13 +30,39 @@ from src.ui import *
 
 logging.basicConfig(level=os.environ.get("LOGLEVEL", "INFO").upper())
 
+
+def _setup_file_logging():
+    """把日志同时写文件，打包成 App 后才有办法排查问题。"""
+    try:
+        from logging.handlers import RotatingFileHandler
+
+        handler = RotatingFileHandler(
+            os.path.join(LOG_DIR, "launcher.log"),
+            maxBytes=2 * 1024 * 1024,
+            backupCount=3,
+            encoding="utf-8",
+        )
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+        )
+        logging.getLogger().addHandler(handler)
+    except Exception:
+        pass
+
+
+_setup_file_logging()
+
 # 设置CUDA设备顺序，保证nvidia-smi的输出顺序和llama.cpp的输出顺序一致
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+
+# 性能测试允许的最大上下文（再大 KV 缓存会吃光内存）
+MAX_BENCHMARK_CONTEXT = 131072
 
 
 class MainWindow(MSFluentWindow):
     def __init__(self):
         super().__init__()
+        self._native_titlebar_ready = False
         self.gpu_manager = GPUManager()
         self.init_navigation()
         self.init_window()
@@ -72,6 +99,56 @@ class MainWindow(MSFluentWindow):
 
         self.navigationInterface.setCurrentItem("启动")
 
+    def systemTitleBarRect(self, size: QSize) -> QRect:
+        """macOS 原生窗口里三颗按钮的位置（左上角，与系统一致）。
+
+        qfluentwidgets 默认把它们摆在右上角（QRect(size.width() - 75, ...)），
+        不符合 macOS 人机界面指南，这里覆盖回左上角。
+        """
+        return QRect(-1, 0 if self.isFullScreen() else 0, 75, size.height())
+
+    def _prepare_native_titlebar(self):
+        """macOS：去掉无边框窗口，改用系统原生标题栏（须在 show 之前调用）。"""
+        self.setWindowFlag(Qt.FramelessWindowHint, False)
+        self.setAttribute(Qt.WA_TranslucentBackground, False)
+        # 阻止 qframelesswindow 再把「全尺寸内容视图 / 隐藏标题栏」加回去
+        self.updateFrameless = lambda: None
+        self._updateSystemTitleBar = lambda: None
+        # 停用自绘标题栏，内容区顶到原生标题栏下沿
+        self.titleBar.hide()
+        self.hBoxLayout.setContentsMargins(0, 0, 0, 0)
+
+    def _apply_native_titlebar(self):
+        """窗口真正显示后，补齐原生标题栏细节（标题、外观、按钮位置）。"""
+        try:
+            import objc
+            import Cocoa
+        except ImportError:
+            return
+        view = objc.objc_object(c_void_p=self.winId().__int__())
+        ns_window = view.window()
+        # 真正回到「标准标题栏」：去掉全尺寸内容视图、显示系统标题
+        ns_window.setStyleMask_(
+            ns_window.styleMask() & ~Cocoa.NSFullSizeContentViewWindowMask
+        )
+        ns_window.setTitleVisibility_(Cocoa.NSWindowTitleVisible)
+        ns_window.setTitlebarAppearsTransparent_(False)
+        # qframelesswindow 初始化时把系统移动关掉了（靠自绘标题栏拖），原生标题栏需要重新打开
+        ns_window.setMovable_(True)
+        ns_window.setMovableByWindowBackground_(False)
+        ns_window.setTitle_(self.windowTitle())
+        # 应用强制深色主题，标题栏也跟随深色，避免突兀的浅色条
+        ns_window.setAppearance_(
+            Cocoa.NSAppearance.appearanceNamed_(Cocoa.NSAppearanceNameDarkAqua)
+        )
+        self.setSystemTitleBarButtonVisible(True)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if sys.platform == "darwin" and not self._native_titlebar_ready:
+            self._native_titlebar_ready = True
+            QTimer.singleShot(0, self._apply_native_titlebar)
+
     def init_window(self):
         self.run_server_section.run_button.clicked.connect(self.run_llamacpp_server)
         self.run_server_section.run_and_share_button.clicked.connect(
@@ -105,14 +182,41 @@ class MainWindow(MSFluentWindow):
         self.setWindowIcon(QIcon(icon))
         self.setWindowTitle(f"Sakura 启动器 {SAKURA_LAUNCHER_GUI_VERSION}")
 
+        # macOS：换成系统原生标题栏（红黄绿在左上角、标题显示在系统标题栏）
+        if sys.platform == "darwin":
+            self._prepare_native_titlebar()
+
         desktop = QApplication.screens()[0].availableGeometry()
         w, h = desktop.width(), desktop.height()
         self.move(w // 2 - self.width() // 2, h // 2 - self.height() // 2)
 
+    def _parse_benchmark_args(self, section):
+        """解析性能测试参数，失败时弹窗提示并返回 (None, None, None)。"""
+        try:
+            npp = int(section.npp_input.text().strip())
+            ntg = int(section.ntg_input.text().strip())
+            npl_list = [
+                int(value)
+                for value in re.split(r"[,，\s]+", section.npl_input.text().strip())
+                if value
+            ]
+            if npp <= 0 or ntg <= 0 or not npl_list or min(npl_list) <= 0:
+                raise ValueError
+        except ValueError:
+            MessageBox(
+                "错误",
+                "性能测试参数不合法：\n"
+                "「Prompt数量」「生成文本数量」需为正整数，\n"
+                "「并行Prompt数量」需为逗号分隔的正整数，例如 1,2,4,8",
+                self,
+            ).exec()
+            return None, None, None
+        return npp, ntg, npl_list
+
     def get_llamacpp_path(self):
         path = SETTING.llamacpp_path
         if not path:
-            return os.path.join(CURRENT_DIR, "llama")
+            return get_llama_dir()
         return os.path.abspath(path)
 
     def run_llamacpp_server(self):
@@ -261,8 +365,8 @@ class MainWindow(MSFluentWindow):
             MessageBox("错误", f"llamacpp路径不存在: {llamacpp_path}", self).exec()
             return
 
-        model_name = section.model_path.currentText().split(os.sep)[-1]
-        model_path = section.model_path.currentText()
+        model_path = section.get_selected_model_path()
+        model_name = os.path.basename(model_path)
         logging.info(f"模型路径: {model_path}")
         logging.info(f"模型名称: {model_name}")
 
@@ -293,9 +397,36 @@ class MainWindow(MSFluentWindow):
         option_model = ["--model", model_path]
         option_extra = []
 
+        context_length = section.context_length_input.value()
+        if executable == "llama-batched-bench":
+            # llama-batched-bench 会把 -c 均分给每个并行 slot，
+            # 而 -npp/-ntg 是要塞进单个 slot 的，上下文不够会直接 decode 失败
+            npp, ntg, npl_list = self._parse_benchmark_args(section)
+            if npp is None:
+                return
+            required_ctx = (npp + ntg) * max(npl_list)
+            if required_ctx > context_length:
+                logging.info(
+                    f"性能测试：上下文 {context_length} 不足以容纳 "
+                    f"(npp {npp} + ntg {ntg}) x {max(npl_list)} 并行，自动调整为 {required_ctx}"
+                )
+                context_length = required_ctx
+            if context_length > MAX_BENCHMARK_CONTEXT:
+                MessageBox(
+                    "错误",
+                    f"性能测试需要 {context_length} 的上下文，超过安全上限 "
+                    f"{MAX_BENCHMARK_CONTEXT}。\n请调小「并行Prompt数量」或「Prompt数量」。",
+                    self,
+                ).exec()
+                return
+            if context_length > 32768:
+                logging.warning(
+                    f"性能测试上下文达到 {context_length}，KV 缓存会占用较多内存，可能较慢"
+                )
+
         option_extra += [
             "-c",
-            str(section.context_length_input.value()),
+            str(context_length),
             "-ngl",
             str(section.gpu_layers_spinbox.value()),
         ]
@@ -375,7 +506,7 @@ class MainWindow(MSFluentWindow):
                 'osascript',
                 '-e',
                 f'''tell application "Terminal"
-                    do script "cd {CURRENT_DIR} && {cmd_str}"
+                    do script "cd {DATA_DIR} && {cmd_str}"
                 end tell'''
             ]
             subprocess.Popen(apple_script, env=env)
@@ -479,4 +610,14 @@ if __name__ == "__main__":
     app.setFont(better_font)
     window = MainWindow()
     window.show()
-    sys.exit(app.exec())
+    exit_code = app.exec()
+    # 退出前等待后台线程/线程池结束，避免 "QThread: Destroyed while thread is still running" 导致 SIGABRT
+    from PySide6.QtCore import QThread, QThreadPool
+
+    QThreadPool.globalInstance().waitForDone(3000)
+    for thread in app.findChildren(QThread):
+        if thread.isRunning():
+            thread.wait(3000)
+    window.deleteLater()
+    app.processEvents()
+    sys.exit(exit_code)

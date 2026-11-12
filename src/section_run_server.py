@@ -1,4 +1,7 @@
+import sys
 import logging
+import json
+import subprocess
 import os
 import math
 from PySide6.QtCore import Qt
@@ -15,7 +18,7 @@ from qfluentwidgets import (
     Slider,
 )
 
-from .common import CURRENT_DIR
+from .common import CURRENT_DIR, MODELS_DIR
 from .gpu import GPUManager, GPUDisplayHelper
 from .sakura import SAKURA_LIST, SakuraCalculator
 from .setting import SETTING
@@ -104,9 +107,9 @@ class RunServerSection(QFrame):
         )
 
     def _create_benchmark_layout(self):
-        self.npp_input = UiLineEdit("Prompt数量", "768")
-        self.ntg_input = UiLineEdit("生成文本数量", "384")
-        self.npl_input = UiLineEdit("并行Prompt数量", "1,2,4,8,16")
+        self.npp_input = UiLineEdit("Prompt数量", "512")
+        self.ntg_input = UiLineEdit("生成文本数量", "128")
+        self.npl_input = UiLineEdit("并行Prompt数量", "1,2,4,8")
         return UiRow(
             UiOptionCol("Prompt数量 -npp", self.npp_input),
             UiOptionCol("生成文本数量 -ntg", self.ntg_input),
@@ -178,20 +181,95 @@ class RunServerSection(QFrame):
 
     def _create_model_selection_layout(self):
         layout = QHBoxLayout()
-        self.model_path = EditableComboBox(self)
-        self.model_path.setPlaceholderText("请选择模型路径")
+        # 用只读 ComboBox：EditableComboBox 本质是 LineEdit + 下拉按钮，
+        # 会同时冒出「清空」按钮，长模型名还会钻到箭头底下，没必要
+        self.model_path = ComboBox(self)
+        # 不要再设最小宽度：窗口窄时会和「刷新」按钮挤成重叠（两个控件压在一起）
+        self.model_path.setMinimumWidth(160)
+        self.model_path.currentIndexChanged.connect(self._update_model_tooltip)
         self.refresh_model_button = PushButton(FIF.SYNC, "刷新")
         self.refresh_model_button.clicked.connect(self.refresh_models)
-        self.refresh_model_button.setFixedWidth(140)
-        layout.addWidget(self.model_path)
-        layout.addWidget(self.refresh_model_button)
+        self.refresh_model_button.setFixedWidth(120)
+        layout.addWidget(self.model_path, 1)
+        layout.addWidget(self.refresh_model_button, 0)
         return layout
+
+    def _model_display_name(self, path):
+        """给模型一个可读名字：优先匹配内置模型列表，其次读 Ollama 仓库的 metadata。"""
+        base = os.path.basename(path)
+        digest = base[len("sha256-"):] if base.startswith("sha256-") else None
+        if digest:
+            for sakura in SAKURA_LIST:
+                if getattr(sakura, "sha256", "") == digest:
+                    return sakura.filename
+            meta = os.path.join(
+                os.path.dirname(os.path.dirname(path)),
+                "metadata",
+                f"sha256-{digest}.json",
+            )
+            try:
+                with open(meta, "r", encoding="utf-8") as f:
+                    name = json.load(f).get("kv", {}).get("general.name")
+                if name:
+                    return name
+            except (OSError, ValueError):
+                pass
+        return base
+
+    @staticmethod
+    def _is_model_file(path):
+        """识别 gguf：正常扩展名，或 Ollama 仓库里没有扩展名的 sha256 blob。"""
+        name = os.path.basename(path)
+        if name.endswith(".gguf"):
+            return True
+        if name.startswith("sha256-"):
+            try:
+                with open(path, "rb") as f:
+                    return f.read(4) == b"GGUF"
+            except OSError:
+                return False
+        return False
+
+    def _update_model_tooltip(self, index):
+        """悬停时显示完整模型名（下拉框里显示的是省略版）。"""
+        path = self.model_path.itemData(index)
+        self.model_path.setToolTip(self._model_display_name(path) if path else "")
+
+    @staticmethod
+    def _elide_model_name(name, max_chars=30):
+        """模型名过长时中间省略：优先按 `-` 分段保留首尾，保住量化等级和扩展名。"""
+        if len(name) <= max_chars:
+            return name
+        parts = name.split("-")
+        if len(parts) >= 4:
+            shortened = f"{parts[0]}-{parts[1]}-…-{parts[-2]}-{parts[-1]}"
+            if len(shortened) <= max_chars + 2:
+                return shortened
+        head = max_chars // 2 - 1
+        tail = max_chars - head - 1
+        return f"{name[:head]}…{name[-tail:]}"
+
+    def get_selected_model_path(self):
+        """模型下拉框选中的真实路径（可能是 Ollama blob，不含 .gguf 扩展名）。"""
+        return self.model_path.currentData() or ""
+
+    def set_selected_model_path(self, path):
+        if not path:
+            self.model_path.setCurrentIndex(-1)
+            return
+        for index in range(self.model_path.count()):
+            if self.model_path.itemData(index) == path:
+                self.model_path.setCurrentIndex(index)
+                return
+        self.model_path.setCurrentText(path)
 
     def refresh_models(self):
         self.model_path.clear()
         models = []
         paths = SETTING.model_search_paths.split("\n")
-        search_paths = [CURRENT_DIR] + [path.strip() for path in paths if path.strip()]
+        search_paths = [CURRENT_DIR, MODELS_DIR] + [
+            path.strip() for path in paths if path.strip()
+        ]
         logging.debug(f"搜索路径: {search_paths}")
         for path in search_paths:
             logging.debug(f"正在搜索路径: {path}")
@@ -203,8 +281,8 @@ class RunServerSection(QFrame):
                         logging.debug(f"正在搜索子目录: {root}")
                         logging.debug(f"文件列表: {files}")
                         for f in files:
-                            if f.endswith(".gguf"):
-                                full_path = os.path.join(root, f)
+                            full_path = os.path.join(root, f)
+                            if self._is_model_file(full_path):
                                 logging.debug(f"找到模型文件: {full_path}")
                                 models.append(full_path)
                 else:
@@ -225,27 +303,12 @@ class RunServerSection(QFrame):
         elif sort_option == "文件大小":
             models.sort(key=lambda x: os.path.getsize(x), reverse=True)
 
-        models_shortest = []
-        for abspath in models:
-            # 检查文件是否在当前目录下（不在子目录中）
-            if os.path.dirname(abspath) == CURRENT_DIR:
-                # 如果在当前目录，使用文件名作为相对路径
-                models_shortest.append(os.path.basename(abspath))
-            else:
-                # 计算相对路径和绝对路径
-                abs_path = os.path.abspath(abspath)
-                # 只有在同一个盘符时才计算相对路径
-                if os.path.splitdrive(abspath)[0] == os.path.splitdrive(CURRENT_DIR)[0]:
-                    rel_path = os.path.relpath(abspath, CURRENT_DIR)
-                    # 选择更短的路径
-                    models_shortest.append(
-                        rel_path if len(rel_path) < len(abs_path) else abs_path
-                    )
-                else:
-                    # 不同盘符时使用绝对路径
-                    models_shortest.append(abs_path)
-
-        self.model_path.addItems(models_shortest)
+        for model in models:
+            abs_path = os.path.abspath(model)
+            full_name = self._model_display_name(abs_path)
+            index = self.model_path.count()
+            self.model_path.addItem(self._elide_model_name(full_name))
+            self.model_path.setItemData(index, abs_path)
 
     def _create_gpu_selection_layout(self):
         self.gpu_combo = ComboBox(self)
@@ -318,16 +381,69 @@ class RunServerSection(QFrame):
             f"每个工作线程的上下文大小: {context_per_thread}"
         )
 
+    @staticmethod
+    def _find_sakura_model(path):
+        """按 sha256（Ollama blob）或文件名在内置模型列表里找到对应配置。"""
+        name = os.path.basename(path)
+        if name.startswith("sha256-"):
+            digest = name[len("sha256-"):]
+            for model in SAKURA_LIST:
+                if getattr(model, "sha256", "") == digest:
+                    return model
+            return None
+        return SAKURA_LIST[name]
+
+    @staticmethod
+    def _total_memory_gib():
+        """读取系统物理内存（macOS 用 sysctl，其它平台退回 os.sysconf）。"""
+        try:
+            if sys.platform == "darwin":
+                out = subprocess.check_output(
+                    ["sysctl", "-n", "hw.memsize"], text=True, timeout=3
+                )
+                return int(out.strip()) / (1024**3)
+            return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / (1024**3)
+        except Exception:
+            return None
+
+    def _auto_configure_apple_silicon(self, sakura_model):
+        """Apple Silicon 用统一内存估算：留 25% 给系统，其余给模型。"""
+        total_gib = self._total_memory_gib()
+        if not total_gib:
+            UiInfoBarWarning(self, "无法读取系统内存，请手动设置参数")
+            return
+
+        available_gib = total_gib * 0.75
+        calculator = SakuraCalculator(sakura_model)
+        config = calculator.recommend_config(available_gib)
+
+        self.n_parallel_spinbox.setValue(config["n_parallel"])
+        self.context_length_input.setValue(config["context_length"])
+        usage = calculator.calculate_memory_requirements(config["context_length"])
+
+        UiInfoBarSuccess(
+            self,
+            f"已按统一内存 {total_gib:.0f} GiB 自动配置: "
+            f"context={config['context_length']}, np={config['n_parallel']}, "
+            f"预计占用 {usage['total_size_gib']:.2f} GiB",
+        )
+
     def auto_configure(self):
-        current_model = self.model_path.currentText()
+        current_model = self.get_selected_model_path()
         if not current_model:
             UiInfoBarWarning(self, "请先选择一个模型")
             return
 
         model_name = current_model.split(os.sep)[-1]
-        sakura_model = SAKURA_LIST[model_name]
+        sakura_model = self._find_sakura_model(current_model)
         if not sakura_model:
-            UiInfoBarWarning(self, "无法找到选中模型的配置信息")
+            UiInfoBarWarning(
+                self, "无法找到选中模型的配置信息（该模型不在内置列表中，请手动设置参数）"
+            )
+            return
+
+        if sys.platform == "darwin":
+            self._auto_configure_apple_silicon(sakura_model)
             return
 
         # 刷新并获取GPU信息
@@ -398,7 +514,7 @@ class RunServerSection(QFrame):
                 "flash_attention": self.flash_attention_check.isChecked(),
                 "no_mmap": self.no_mmap_check.isChecked(),
                 "gpu": selected_gpu,  # 保存完整的GPU显示名称
-                "model_path": self.model_path.currentText(),
+                "model_path": self.get_selected_model_path(),
                 "context_length": self.context_length_input.value(),
                 "n_parallel": self.n_parallel_spinbox.value(),
                 "host": self.host_input.text(),
@@ -439,7 +555,7 @@ class RunServerSection(QFrame):
                         self.command_template = "%cmd% " + cmd2
 
                 self.gpu_layers_spinbox.setValue(config.get("gpu_layers", 200))
-                self.model_path.setCurrentText(config.get("model_path", ""))
+                self.set_selected_model_path(config.get("model_path", ""))
                 self.context_length_input.setValue(config.get("context_length", 2048))
                 self.n_parallel_spinbox.setValue(config.get("n_parallel", 1))
                 self.host_input.setText(config.get("host", "127.0.0.1"))
