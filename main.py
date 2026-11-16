@@ -20,6 +20,7 @@ from qfluentwidgets import (
 
 from src.common import *
 from src.llamacpp import get_llamacpp_version
+from src.sakura import resolve_model_name
 from src.gpu import GPUManager
 from src.section_run_server import RunServerSection
 from src.section_download import DownloadSection
@@ -368,8 +369,11 @@ class MainWindow(MSFluentWindow):
 
         model_path = section.get_selected_model_path()
         model_name = os.path.basename(model_path)
+        model_alias = resolve_model_name(model_path)
         logging.info(f"模型路径: {model_path}")
         logging.info(f"模型名称: {model_name}")
+        if model_alias != model_name:
+            logging.info(f"模型别名: {model_alias}")
 
         # 将GPU检查提前到这里
         if section.gpu_combo.currentText() != "自动":
@@ -435,7 +439,7 @@ class MainWindow(MSFluentWindow):
         if executable == "llama-server":
             option_extra += [
                 "-a",
-                model_name,
+                model_alias,
                 "--host",
                 section.host_input.text(),
                 "--port",

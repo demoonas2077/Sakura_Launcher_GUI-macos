@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import Dict, List, Optional
 from hashlib import sha256
 
@@ -142,3 +143,24 @@ class SakuraList(QObject):
 
 
 SAKURA_LIST = SakuraList()
+
+
+def resolve_model_name(path: str) -> str:
+    """取模型的对外名称（llama-server 的 -a）。
+
+    Ollama 的模型库里文件名是 ``sha256-<digest>``，直接拿来做别名会让下游
+    （共享端白名单、翻译器白名单）认不出是哪个 Sakura 模型。这里在内置模型表里
+    按 sha256 反查真实文件名，查不到才退回原文件名。
+    """
+    name = os.path.basename(path)
+    if not name.startswith("sha256-"):
+        return name
+
+    digest = name[len("sha256-"):]
+    for model in SAKURA_LIST:
+        if model.sha256 == digest:
+            logging.info(f"按 sha256 识别出模型: {model.filename}")
+            return model.filename
+
+    logging.warning(f"模型 {name} 不在内置模型列表中，别名继续使用文件名")
+    return name
